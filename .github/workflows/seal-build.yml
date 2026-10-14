@@ -1,0 +1,134 @@
+name: seal-build
+
+# Build-and-pack only. The test matrix runs on Travis (.travis.yml).
+#
+# jQuery 2.2.x is NOT published as `npm pack` of this repo: the release
+# (build/release/dist.js) copies the built files into the separate
+# jquery-dist repo and publishes from there. This workflow reproduces that
+# assembly and packs it with the release toolchain (Node 0.10 / npm 2.15.1).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and pack jquery 2.2.4
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch jquery-dist README
+        run: |
+          set -euo pipefail
+          # The published README.md is jquery-dist's own README, which the
+          # release keeps in place (rmIgnore in build/release/dist.js).
+          mkdir -p "$RUNNER_TEMP/seal/out"
+          curl -fsSL --retry 5 --retry-delay 5 \
+            -o "$RUNNER_TEMP/seal/README.md" \
+            https://raw.githubusercontent.com/jquery/jquery-dist/2.2.4/README.md
+          sha256sum "$RUNNER_TEMP/seal/README.md"
+
+      - name: Write container build script
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/seal/build.sh" <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          umask 022
+          mkdir -p "$HOME"
+
+          # build/tasks/build.js appends $COMMIT to the embedded version.
+          unset COMMIT
+
+          node --version
+          npm --version
+
+          # Resolve devDependencies as of the 2.2.4 release (2016-05-20).
+          npm config set registry https://:2016-05-20T17%3A26%3A07.921Z@time-machines-npm.sealsecurity.io/
+          npm config set fetch-retries 5
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+
+          # Reproducibility: build/tasks/build.js embeds the build time as
+          # @DATE in the dist/jquery.js header. Pin it to the 2.2.4 release
+          # header value (" * Date: 2016-05-20T17:23Z"). Done here rather than
+          # as a source edit because edits under build/ are dropped from the
+          # version patch.
+          sed -i -E 's#(\.replace\( /@DATE/g, ).*\);$#\1"2016-05-20T17:23Z" );#' build/tasks/build.js
+          if ! grep -q '"2016-05-20T17:23Z"' build/tasks/build.js; then
+            echo "ERROR: failed to pin @DATE in build/tasks/build.js" >&2
+            exit 1
+          fi
+          if grep '@DATE/g' build/tasks/build.js | grep -q 'new Date()'; then
+            echo "ERROR: @DATE replace line still uses new Date()" >&2
+            exit 1
+          fi
+          grep -n '@DATE/g' build/tasks/build.js
+
+          npm install
+
+          # Gruntfile "dev" task minus "lint". "dist:*" only checks the dist
+          # files for CRLF / non-ASCII (no dist/.destination.json -> no copies).
+          ./node_modules/.bin/grunt "build:*:*" uglify remove_map_comment "dist:*"
+
+          # Assemble the jquery-dist package exactly as build/release/dist.js.
+          PKG=/seal/distpkg
+          rm -rf "$PKG"
+          mkdir -p "$PKG/dist" "$PKG/external"
+          cp -f dist/jquery.js dist/jquery.min.js dist/jquery.min.map "$PKG/dist/"
+          cp -r external/sizzle "$PKG/external/"
+          cp -r src "$PKG/"
+          cp -f LICENSE.txt AUTHORS.txt package.json "$PKG/"
+          cp -f /seal/README.md "$PKG/README.md"
+          (cd "$PKG" && node -e '
+            var fs = require("fs");
+            var pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            fs.writeFileSync("bower.json", JSON.stringify({
+              name: pkg.name,
+              main: pkg.main,
+              license: "MIT",
+              ignore: ["package.json"],
+              keywords: pkg.keywords
+            }, null, 2));
+          ')
+
+          if find "$PKG" \( -name node_modules -o -name .npmignore -o -name .gitignore \) | grep -q .; then
+            echo "ERROR: unexpected node_modules/.npmignore/.gitignore in $PKG" >&2
+            exit 1
+          fi
+          find "$PKG" -type d -exec chmod 755 {} +
+          find "$PKG" -type f -exec chmod 644 {} +
+
+          cd "$PKG"
+          npm pack
+          test -f jquery-2.2.4.tgz
+          mv -f jquery-2.2.4.tgz /seal/out/jquery-2.2.4.tgz
+          EOF
+          sha256sum "$RUNNER_TEMP/seal/build.sh"
+
+      - name: Build and pack in node:0.10
+        run: |
+          set -euo pipefail
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp/home \
+            -v "$GITHUB_WORKSPACE":/work -v "$RUNNER_TEMP/seal":/seal \
+            -w /work node:0.10 bash /seal/build.sh
+
+      - name: Show artifact
+        run: |
+          set -euo pipefail
+          TGZ="$RUNNER_TEMP/seal/out/jquery-2.2.4.tgz"
+          tar tzvf "$TGZ"
+          echo "entries: $(tar tzf "$TGZ" | wc -l)"
+          sha256sum "$TGZ"
+          stat -c 'size: %s bytes' "$TGZ"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jquery-2.2.4
+          path: ${{ runner.temp }}/seal/out/jquery-2.2.4.tgz
+          if-no-files-found: error

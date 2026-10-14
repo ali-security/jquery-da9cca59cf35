@@ -1,8 +1,102 @@
 language: node_js
-sudo: false
-node_js:
-- "0.10"
-- "0.12"
-- "4"
-- "5"
-- "6"
+dist: focal
+
+# Every leg is listed explicitly under jobs.include (no top-level node_js
+# matrix), so the include list cannot collapse the version matrix.
+
+before_install:
+  # Resolve devDependencies as of the 2.2.4 release (2016-05-20)
+  - npm config set registry https://:2016-05-20T17%3A26%3A07.921Z@time-machines-npm.sealsecurity.io/
+  - npm config set fetch-retries 5
+  - npm config set fetch-retry-mintimeout 20000
+  - npm config set fetch-retry-maxtimeout 120000
+
+install:
+  - npm install
+
+script:
+  - npm test
+
+jobs:
+  include:
+    # Node 0.x: jsdom 5.6.1 refuses to load, and the Gruntfile then registers
+    # test_fast as an empty task (gh-2519), so the node smoke tests would be
+    # silently skipped. Install jsdom@3 (upstream's own remedy); its native
+    # contextify dependency needs Python 2 for node-gyp.
+    - name: "Node 0.10"
+      node_js: "0.10"
+      addons:
+        apt:
+          packages:
+            - python2
+      install:
+        - npm install
+        - npm install jsdom@3 --python=/usr/bin/python2
+        - node -e "require('jsdom')"
+      script:
+        - npm test
+
+    - name: "Node 0.12"
+      node_js: "0.12"
+      addons:
+        apt:
+          packages:
+            - python2
+      install:
+        - npm install
+        - npm install jsdom@3 --python=/usr/bin/python2
+        - node -e "require('jsdom')"
+      script:
+        - npm test
+
+    - name: "Node 4"
+      node_js: "4"
+      script:
+        - npm test
+
+    - name: "Node 5"
+      node_js: "5"
+      script:
+        - npm test
+
+    - name: "Node 6"
+      node_js: "6"
+      script:
+        - npm test
+
+    # Browser QUnit suite (test/index.html -> test/unit/*.js) against the
+    # unminified dist/jquery.js, driven by test/seal-browser-runner.js.
+    - name: "QUnit browser suite (headless Chrome)"
+      node_js: "20"
+      addons:
+        chrome: stable
+        apt:
+          packages:
+            - php-cli
+      env:
+        # Sync XHR inside an unload handler is forbidden since Chrome 80, so
+        # the fixture's request always completes with "error".
+        - 'SEAL_SKIP_TESTS="ajax: #14379 - jQuery.ajax() on unload"'
+      install:
+        # Build dist/ with the release-era toolchain (build + lint + uglify)
+        - nvm install 0.10
+        - nvm use 0.10
+        - npm install
+        - ./node_modules/.bin/grunt
+        - nvm use 20
+        # Test driver in its own tree, from the live registry
+        - mkdir -p /tmp/driver
+        - cd /tmp/driver && npm init -y && npm install puppeteer-core --registry=https://registry.npmjs.org/ && cd -
+      script:
+        - export CHROME_BIN="$(which google-chrome-stable)"
+        - '"$CHROME_BIN" --version'
+        - /usr/bin/php --version
+        # 127.0.0.1:8000 fronts a pool of 16 single-process `php -S`
+        # backends, one in-flight request each. A single php -S starves the
+        # iframe fixtures, and PHP_CLI_SERVER_WORKERS still lets one worker
+        # queue a request behind a sleeping fixture (core/dont_return.php),
+        # which flakes the #13655 async-ready test. See test/seal-php-pool.js.
+        - PHP_BIN=/usr/bin/php node test/seal-php-pool.js > /tmp/php-pool.log 2>&1 &
+        - for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do curl -sf -o /dev/null http://127.0.0.1:8000/test/index.html && break; sleep 1; done
+        - cat /tmp/php-pool.log
+        - NODE_PATH=/tmp/driver/node_modules node test/seal-browser-runner.js
