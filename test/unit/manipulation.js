@@ -2659,3 +2659,82 @@ QUnit.test( "Make sure col element is appended correctly", function( assert ) {
 
 	assert.strictEqual( table.find( "td" ).width(), 150 );
 } );
+
+QUnit.test( "Sanitized HTML doesn't get unsanitized", function( assert ) {
+
+	var container,
+		counter = 0,
+		inputs = [],
+		done = assert.async();
+
+	assert.expect( 3 );
+
+	Globals.register( "xss" );
+	window.xss = sinon.spy();
+
+	container = jQuery( "<div></div>" );
+	container.appendTo( "#qunit-fixture" );
+
+	function test( htmlString ) {
+		var div = jQuery( "<div></div>" );
+
+		inputs[ counter++ ] = htmlString;
+
+		div.appendTo( container );
+		div.html( htmlString );
+	}
+
+	// Note: below test cases need to invoke the xss function with consecutive
+	// decimal parameters for the assertion messages to be correct.
+	// The <style>/<xmp> contents are inert in a regular parsing context but
+	// escape it when parsed inside a <select> wrapper (gh-4647).
+	test( "<option><style></option></select><img src=url404 onerror=xss(0)></style>" );
+	test( "<optgroup><style></optgroup></select><img src=url404 onerror=xss(1)></style>" );
+	test( "<option><xmp></option></select><img src=url404 onerror=xss(2)></xmp>" );
+
+	setTimeout( function() {
+		var i;
+
+		for ( i = 0; i < inputs.length; i++ ) {
+			assert.ok( !window.xss.calledWith( i ),
+				"Insecure code wasn't executed, input: " + inputs[ i ] );
+		}
+		done();
+	}, 1000 );
+} );
+
+// Support: IE <=9 only
+// IE 9 replaces <option> tags with their contents when they are parsed outside
+// of a select element, so it still needs the <select> wrapper.
+QUnit[ ( function() {
+	var div = document.createElement( "div" );
+	div.innerHTML = "<option></option>";
+	return !!div.lastChild;
+} )() ? "test" : "skip" ]( "<option> & <optgroup> are not parsed inside a <select> wrapper (gh-4647)",
+	function( assert ) {
+		assert.expect( 8 );
+
+		var nodes, div, select;
+
+		// Markup closing the wrapper must not make jQuery pick the wrong nodes
+		nodes = jQuery.parseHTML( "<option>a</option></select><b>b</b>" );
+		assert.equal( nodes.length, 2, "Both top-level nodes are returned" );
+		assert.equal( nodes[ 0 ] && nodes[ 0 ].nodeName.toLowerCase(), "option",
+			"First node is the <option>" );
+		assert.equal( nodes[ 1 ] && nodes[ 1 ].nodeName.toLowerCase(), "b",
+			"Second node is the <b>" );
+
+		div = jQuery( "<div></div>" ).appendTo( "#qunit-fixture" )
+			.html( "<optgroup label='g'><option>a</option></optgroup></select><b>b</b>" );
+		assert.equal( div.children().length, 2, "Both top-level elements are inserted" );
+		assert.equal( div.children()[ 0 ] && div.children()[ 0 ].nodeName.toLowerCase(),
+			"optgroup", "First element is the <optgroup>" );
+		assert.equal( div.children( "b" ).length, 1, "The <b> element is inserted" );
+
+		// Options can still be appended to a select element
+		select = jQuery( "<select></select>" ).appendTo( "#qunit-fixture" )
+			.append( "<option value='1'>one</option>" );
+		assert.equal( select[ 0 ].options.length, 1, "The <option> was appended to the <select>" );
+		assert.equal( select.val(), "1", "The appended <option> is selectable" );
+	}
+);
